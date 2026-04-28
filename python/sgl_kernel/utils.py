@@ -50,10 +50,25 @@ def get_device_capability() -> Tuple[int, int]:
 
 @functools.lru_cache(maxsize=1)
 def is_xe2_arch() -> bool:
-    # Xe2(BMG-G21) has compute capability 20
+    # Xe2 (BMG-G21, BMG-G31) — Device.cpp reports major=2.
     device = torch.xpu.current_device()
     major, _ = torch.ops.sgl_kernel.query_device.default(device)
     return major == 2
+
+
+@functools.lru_cache(maxsize=1)
+def is_xe3_arch() -> bool:
+    # Xe3 / Xe3P — Panther Lake, Wildcat Lake. Reported as major=3 by
+    # Device.cpp. These chips currently route through the Xe2 cutlass
+    # kernels as a workaround (see vllm-xpu-kernels@368f685).
+    device = torch.xpu.current_device()
+    major, _ = torch.ops.sgl_kernel.query_device.default(device)
+    return major == 3
+
+
+def is_xe2_or_xe3_arch() -> bool:
+    """Feature-gate for kernels that work on both Xe2 and (Xe2-on-Xe3 WA) Xe3."""
+    return is_xe2_arch() or is_xe3_arch()
 
 
 def ceil_div(x: int, y: int) -> int:

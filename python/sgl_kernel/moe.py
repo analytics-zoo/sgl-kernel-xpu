@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .utils import is_xe2_arch
+from .utils import is_xe2_arch, is_xe2_or_xe3_arch
 
 
 def moe_align_block_size(
@@ -323,14 +323,14 @@ def fused_experts(
         assert (
             b1.dtype == torch.bfloat16 or b1.dtype == torch.float32
         ), "b1 must be bfloat16 or float32"
-        if is_xe2_arch() and b1.dtype == torch.bfloat16:
+        if is_xe2_or_xe3_arch() and b1.dtype == torch.bfloat16:
             # cast b1 to float32, since bias is accumulated in float32 in the kernel
             b1 = b1.float()
     if b2 is not None:
         assert (
             b2.dtype == torch.bfloat16 or b2.dtype == torch.float32
         ), "b2 must be bfloat16 or float32"
-        if is_xe2_arch() and b2.dtype == torch.bfloat16:
+        if is_xe2_or_xe3_arch() and b2.dtype == torch.bfloat16:
             # cast b2 to float32, since bias is accumulated in float32 in the kernel
             b2 = b2.float()
     # Shape check
@@ -420,7 +420,9 @@ def fused_experts(
     else:
         raise ValueError(f"Unsupported activation {activation}")
 
-    assert is_xe2_arch(), f"Current MoE is only supported on BMG"
+    assert (
+        is_xe2_or_xe3_arch()
+    ), "Current MoE is only supported on Xe2 (BMG) and Xe3 (Panther/Wildcat Lake) via Xe2 cutlass WA"
 
     # heuristic for choosing fused or unfused act, can be tuned
     avg_m = (M * TopK) // E

@@ -38,7 +38,12 @@ set(CUTLASS_ENABLE_SYCL ON CACHE BOOL "Enable SYCL in the cutlass" FORCE)
 set(CUTLASS_ENABLE_BENCHMARKS  OFF CACHE BOOL "Remove benchmark to avoid cmake version issue in google benchmark" FORCE)
 set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable headers only mode in cutlass" FORCE)
 
-# cutlass
+# cutlass (upstream pin — DO NOT bump; bumping affects FMHA/MLA template
+# expansion and breaks Qwen3.5 downstream sampling in this toolchain).
+# gdn_attn/xe_2/ was originally written against 3f2a337e but the APIs it
+# relies on (barrier_arrive, cutlass::get_sub_group_id, get_block_2d_copy_D,
+# etc.) already exist in 2fc09973 — the earlier "needs 3f2a337e" diagnosis
+# was wrong; the real build blocker was a missing -DSYCL_INTEL_TARGET.
 FetchContent_Declare(
     repo-cutlass-sycl
     GIT_REPOSITORY https://github.com/intel/sycl-tla.git

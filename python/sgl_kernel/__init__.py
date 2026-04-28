@@ -76,8 +76,21 @@ from sgl_kernel.speculative import (
     tree_speculative_sampling_target_only,
     verify_tree_greedy,
 )
-from sgl_kernel.utils import get_device_capability, is_xe2_arch
+from sgl_kernel.utils import (
+    get_device_capability,
+    is_xe2_arch,
+    is_xe2_or_xe3_arch,
+    is_xe3_arch,
+)
 from sgl_kernel.version import __version__
+
+# ---- Vendored: GDN attention (from vllm-xpu-kernels) ----
+from sgl_kernel.gdn import gdn_attention
+
+# NOTE: ESIMD vendored ops (esimd.py / eagle_ops.py / moe_batch.py) are not
+# imported here — the ESIMD sources aren't compiled into sgl_kernel yet
+# (see src/CMakeLists.txt for why). They exist on disk but registering them
+# would fail with "attribute not found on torch.ops" at import time.
 
 build_tree_kernel = (
     None  # TODO(ying): remove this after updating the sglang python code.
