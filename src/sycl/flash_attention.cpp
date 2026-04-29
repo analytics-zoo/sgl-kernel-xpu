@@ -329,6 +329,11 @@ std::vector<at::Tensor> mha_fwd(
   params.q_group_size = num_heads / num_heads_k;
   params.seqlen_q = seqlen_q;
   params.seqlen_k = seqlen_k;
+  // Arguments::seqlen_knew has no in-struct default — leaving it
+  // uninitialized pairs with the cu_seqlens_knew alias above to feed garbage
+  // into the runner's shape construction. Mirror cu_seqlens_knew and alias
+  // it to seqlen_k for sglang's call pattern (all K is "new").
+  params.seqlen_knew = seqlen_k;
   params.d = head_size;
   params.d_rounded = head_size_rounded;
 
@@ -359,6 +364,10 @@ std::vector<at::Tensor> mha_fwd(
   params.window_size_right = window_size_right;
   params.total_q = total_q;
   params.total_k = total_k;
+  // Arguments::total_knew defaults to 0 but is read by the runner's varlen
+  // shape construction. Alias it to total_k so the ragged-tensor shape
+  // matches the cu_seqlens_knew alias set above.
+  params.total_knew = total_k;
   params.b_k = batch_size_k;
   params.dv = head_size_v;
   params.page_table = page_table.value().data_ptr<int>();
@@ -610,6 +619,9 @@ std::vector<at::Tensor> mha_fwd(
   params.q_group_size = 1;
   params.seqlen_q = seqlen_q;
   params.seqlen_k = seqlen_k;
+  // See matching comment in decode::mha_fwd — seqlen_knew has no in-struct
+  // default; alias it to seqlen_k for sglang's call pattern.
+  params.seqlen_knew = seqlen_k;
   params.d = head_size;
   params.d_rounded = head_size_rounded;
 
@@ -638,6 +650,10 @@ std::vector<at::Tensor> mha_fwd(
   params.window_size_right = window_size_right;
   params.total_q = total_q;
   params.total_k = total_k;
+  // Arguments::total_knew defaults to 0 but is read by the runner's varlen
+  // shape construction. Alias it to total_k so the ragged-tensor shape
+  // matches the cu_seqlens_knew alias set above.
+  params.total_knew = total_k;
   params.b_k = batch_size_k;
   params.dv = head_size_v;
   params.page_table = page_table.value().data_ptr<int>();
