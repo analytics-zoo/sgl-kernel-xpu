@@ -213,6 +213,53 @@ combination still triggers a GPU `engine_class=ccs` reset at the boundary
 between the last prefill chunk and the first decode step — possibly a
 second submission-pattern bug, not yet root-caused.
 
+### Follow-up audit (2026-04-30): `seqlen_knew` / `total_knew` also uninit
+
+Beyond `cu_seqlens_knew`, the prefill/decode runners also read
+`params.seqlen_knew` (no in-struct default) and `params.total_knew`
+(defaults to 0) for the varlen shape construction. Leaving them at
+garbage/zero feeds mismatched dimensions into CUTLASS. Fixed by aliasing
+both to the cache side (`seqlen_k`, `total_k`) at host side. With this,
+multi-prompt offline (`run_qwen35_radix.py`, 3 prompts × 96 tokens) is
+still stable and online GSM8K parallel-8 progresses from 1/50 → 9/50
+requests completed before the scheduler watchdog fires. Sampling output
+looks correct on the requests that finish.
+
+### Remaining mystery: single-prompt decode still hangs
+
+Even with `cu_seqlens_knew`, `seqlen_knew`, `total_knew` all aliased, a
+minimal `engine.generate([one_prompt], {temperature: 0, max_new_tokens: 8})`
+still deadlocks in `tolist()` → `urEventWait` with a synchronous
+`engine_class=ccs` engine reset visible in kern.log. Multi-prompt (bsz≥3)
+runs to completion on the same server with identical code.
+
+**Evidence collected**:
+1. Field audit: every Arguments field that the decode/prefill runners
+   read is now set by the host-side mha_fwd. Remaining uninitialized
+   fields (`leftpad_k`, `seqused_q`, `seqused_k`, `knew_ptr`, rotary ptrs
+   when not used, etc.) are never dereferenced along our code path.
+2. Aliasing `cu_seqlens_knew` / `seqlen_knew` / `total_knew` to the Q
+   side instead of the K side was tried — it regresses the 3-prompt case
+   to a `TensorCompareKernels.cpp:180` sampler assert (meaning attention
+   output is all-zero or NaN), confirming the K-side aliasing is right
+   for our call pattern.
+3. Forcing `params.use_split_kv = false` for small `batch * num_kv_heads`
+   surfaces the OOB immediately instead of hanging silently, so the
+   split-KV path does hide the underlying error rather than fix it.
+4. `kern.log` shows `xe 0000:18:00.0 Tile0: GT0: Engine reset:
+   engine_class=ccs` within a second of the hang — the compute engine
+   is being force-reset by GuC.
+
+**Hypothesis**: the CUTLASS `FMHADecodeKernel` (or its split-KV wrapper
+selected when `batch * num_kv_heads < num_xe_cores`) has a bug on the
+shape `(batch=1, num_kv_heads=2, head_dim=256, num_kv_splits≈10)`. Qwen3-0.6B
+(`head_dim=128, num_kv_heads=8`) avoids the triggering shape because its
+`batch * num_kv_heads` is larger so `num_splits` is smaller, and its
+head_dim is in a different codegen branch.
+
+Not chased further here; needs someone who can instrument the kernel
+itself.
+
 ## Outstanding action items
 
 - [ ] File upstream issue against `intel/sycl-tla`: cutlass-sycl `3f2a337e` under oneAPI 2025.3.3 causes silent correctness regression in sgl-kernel-xpu FMHA/MLA (Qwen3.5 sampling path). Reproducer: swap GIT_TAG in sgl-kernel-xpu's CMakeLists.txt and rerun `run_qwen35.py`.
