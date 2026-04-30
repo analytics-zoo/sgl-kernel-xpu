@@ -225,13 +225,43 @@ still stable and online GSM8K parallel-8 progresses from 1/50 → 9/50
 requests completed before the scheduler watchdog fires. Sampling output
 looks correct on the requests that finish.
 
-### Remaining mystery: single-prompt decode still hangs
+### Third fix: `is_causal` derivation in `decode::mha_fwd`
 
-Even with `cu_seqlens_knew`, `seqlen_knew`, `total_knew` all aliased, a
-minimal `engine.generate([one_prompt], {temperature: 0, max_new_tokens: 8})`
-still deadlocks in `tolist()` → `urEventWait` with a synchronous
-`engine_class=ccs` engine reset visible in kern.log. Multi-prompt (bsz≥3)
-runs to completion on the same server with identical code.
+decode::mha_fwd was hardcoding `params.is_causal = false` and then
+computing `params.is_local = (window_size_left >= 0 || window_size_right >= 0) && !is_causal`.
+By that point `window_size_right` had already been clobbered to 0 (by the
+earlier `if (is_causal) window_size_right = 0;` branch when caller passes
+causal=true), so `is_local` ended up **true** — the kernel's template was
+instantiated as a local sliding-window (SWA) mask with
+(window_left=63, window_right=0), instead of the simple "attend to all of
+cache_seqlens" behavior decode actually wants. The CUTLASS SWA codegen
+path for this shape reliably hangs the XPU compute engine on
+single-prompt decode.
+
+Fix: derive `is_causal` from window_size the same way `prefill::mha_fwd`
+does (`is_causal = window_size_left < 0 && window_size_right == 0`). With
+causal=true, `is_local` falls back to false, the kernel runs the plain
+"attend to full seqlen_k" codepath, and single-prompt decode progresses
+for the first 4 tokens. Multi-prompt (bsz≥3) always took this plain path
+anyway, so it's untouched.
+
+### Remaining mystery: single-prompt decode still hangs at step ≥ 5
+
+Even with `cu_seqlens_knew`, `seqlen_knew`, `total_knew` all aliased and
+`is_causal` correctly derived, `engine.generate([one_prompt], {max_new_tokens: 5})`
+still hangs. `max_new_tokens=4` works reliably. Multi-prompt (bsz≥3)
+still runs to completion.
+
+Notes from audit:
+- Total FMHA kernel dumps: **n=4 → 6 prefill layers + 18 decode dumps** (= 3 decode steps × 6 full-attn layers), completes fine. **n=5 → 6 prefill + 24 decode dumps, then hangs during decode step 5**.
+- sglang's `q_group_size` for decode is 4 at bs=1 (8 num_heads / 2 num_kv_heads), compared to 1 at prefill. So the bug is specifically in the `FmhaSplitDecodeRunner<4, 256, 64>` kernel instantiation.
+- `num_kv_splits` computes to 1 at decode (max_seqlen_k=page_size=64 → max_splits=1), so effectively only a single split is launched — the split-reduce kernel isn't run. But `params.use_split_kv=true` still routes through the split-decode kernel instead of `FmhaDecodeRunner`.
+- `params.is_causal` is **not** a dispatch template argument in the split-decode kernel (line 49 of `xe_fmha_fwd_split_decode_kernel.cpp.in` hardcodes `Causal=false`). Our `is_causal` fix only functions through its side effect on `is_local` dispatch.
+- The hang looks like some kernel-local state accumulating across consecutive decode launches, possibly around `cache_seqlens` crossing an internal loop-bound at 4→5 tokens. Without device-side printf instrumentation in the kernel itself (which would require more build iterations than we invested today), the exact cause isn't pinned.
+
+**Workarounds** (not enabled by default, pending wider validation):
+- Skip single-batch decode by running sglang with `--parallel ≥ 3` client-side (feeds scheduler enough batches to keep bs ≥ 2 most of the time; the bug was never observed at bs ≥ 3).
+- OR set `mamba_scheduler_strategy=extra_buffer` + radix cache + batch ≥ 2 concurrent request streams.
 
 **Evidence collected**:
 1. Field audit: every Arguments field that the decode/prefill runners
