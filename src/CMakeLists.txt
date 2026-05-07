@@ -44,9 +44,9 @@ include(BuildOnLinux.cmake)
 # APIs we need already exist in 2fc09973; FMHA/MLA template expansion stays
 # identical to upstream, so Qwen3.5 sampling path is unaffected.
 include(${CMAKE_CURRENT_SOURCE_DIR}/GdnAttn.cmake)
-# Esimd.cmake still disabled: sgl-kernel-xpu's sycl_add_library() forces
-# -fsycl-host-compiler=gcc, which breaks -fsycl-unnamed-lambda (needed by
-# qkv_split_norm_rope.h) and collides with std::experimental::simd pulled
-# in by fp8_GEMM_pert.h. Revisit once the ESIMD call sites are renamed or
-# run_sycl.cmake is patched.
+# Esimd.cmake still disabled: with oneAPI 2025.3 the ESIMD reduce/sum template
+# instantiation on simd<float, 2> fails to compile (invalid cast in
+# esimd/detail/types.hpp, subscripted value is neither array nor pointer in
+# intrin.hpp). Needs ESIMD header version alignment or kernel refactor
+# (e.g. avoid detail::sum over length-2 vectors in qkv_split_norm_rope.h:107).
 # include(${CMAKE_CURRENT_SOURCE_DIR}/Esimd.cmake)
