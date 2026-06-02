@@ -50,8 +50,13 @@ foreach(sycl_src ${ATen_XPU_SYCL_COMMON})
 endforeach()
 
 # xe20 kernels
-set(XE20_OFFLINE_COMPILER_AOT_OPTIONS "-device bmg")
-set(XE20_OFFLINE_COMPILER_FLAGS "${XE20_OFFLINE_COMPILER_AOT_OPTIONS}${SYCL_OFFLINE_COMPILER_CG_OPTIONS}")
+# spir64 JIT build (PTL/Xe3): no AOT device, JIT at runtime.
+if(DPCPP_SYCL_TARGET STREQUAL "spir64")
+  set(XE20_OFFLINE_COMPILER_FLAGS "")
+else()
+  set(XE20_OFFLINE_COMPILER_AOT_OPTIONS "-device bmg")
+  set(XE20_OFFLINE_COMPILER_FLAGS "${XE20_OFFLINE_COMPILER_AOT_OPTIONS}${SYCL_OFFLINE_COMPILER_CG_OPTIONS}")
+endif()
 foreach(sycl_src ${ATen_XPU_SYCL_XE20})
   get_filename_component(name ${sycl_src} NAME_WLE REALPATH)
   set(sycl_lib sgl-ops-sycl-${name})

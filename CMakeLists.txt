@@ -25,7 +25,14 @@ find_package(Torch REQUIRED)
 set(SGL_OPS_XPU_ROOT ${PROJECT_SOURCE_DIR})
 list(APPEND CMAKE_MODULE_PATH ${SGL_OPS_XPU_ROOT}/cmake/Modules)
 
-set(DPCPP_SYCL_TARGET "bmg" CACHE STRING "dpcpp target device" FORCE)
+# PTL build attempt: build AOT GEN-ISA for Panther Lake (Xe3) in addition to
+# bmg. Was FORCE-pinned to "bmg" upstream (B60-only). Allow override via the
+# SGL_DPCPP_TARGET env var; default now targets PTL for this machine.
+if(DEFINED ENV{SGL_DPCPP_TARGET})
+  set(DPCPP_SYCL_TARGET "$ENV{SGL_DPCPP_TARGET}" CACHE STRING "dpcpp target device" FORCE)
+else()
+  set(DPCPP_SYCL_TARGET "ptl-h,ptl-u" CACHE STRING "dpcpp target device" FORCE)
+endif()
 
 include(${SGL_OPS_XPU_ROOT}/cmake/SYCL.cmake)
 include(${SGL_OPS_XPU_ROOT}/cmake/BuildFlags.cmake)

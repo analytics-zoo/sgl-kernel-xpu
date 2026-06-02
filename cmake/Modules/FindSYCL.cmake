@@ -411,13 +411,18 @@ macro(SYCL_LINK_DEVICE_OBJECTS output_file sycl_target sycl_offline_compiler_fla
       set(_sycl_xs_flags)
     endif()
 
+    # -fsycl must be a top-level driver flag (icx errors that -fsycl-targets /
+    # -fsycl-link need -fsycl). Use the conditional _sycl_xs_flags so the JIT
+    # (empty offline flags) path omits -Xs entirely instead of emitting a bare
+    # -Xs that swallows the next token.
     add_custom_command(
       OUTPUT ${output_file}
       DEPENDS ${object_files}
       COMMAND ${SYCL_EXECUTABLE}
+      -fsycl
       ${SYCL_device_link_flags}
       -fsycl-link ${object_files}
-      -Xs ${sycl_offline_compiler_flags}
+      ${_sycl_xs_flags}
       -o ${output_file}
       COMMENT "Building SYCL device link file ${output_file_relative_path}"
       )

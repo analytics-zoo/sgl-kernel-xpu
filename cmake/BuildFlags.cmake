@@ -128,16 +128,30 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
       list(APPEND AOT_TARGETS "bmg")
     elseif(TGT STREQUAL "intel_gpu_pvc" OR TGT STREQUAL "pvc")
       list(APPEND AOT_TARGETS "pvc")
+    elseif(TGT STREQUAL "intel_gpu_ptl_h" OR TGT STREQUAL "ptl-h" OR TGT STREQUAL "ptl_h")
+      list(APPEND AOT_TARGETS "ptl-h")
+    elseif(TGT STREQUAL "intel_gpu_ptl_u" OR TGT STREQUAL "ptl-u" OR TGT STREQUAL "ptl_u")
+      list(APPEND AOT_TARGETS "ptl-u")
     endif()
   endforeach()
 
   list(REMOVE_DUPLICATES AOT_TARGETS)
   string(JOIN "," AOT_TARGETS_STR ${AOT_TARGETS})
-  set(SYCL_TARGETS_OPTION -fsycl-targets=spir64_gen)
+  # PTL/Xe3 has no AOT device name cutlass-sycl accepts (its allowlist is
+  # bmg/pvc/spir64). When the target list is exactly spir64, build JIT: emit
+  # SPIR-V (-fsycl-targets=spir64) and DO NOT pass an ocloc -device, so the
+  # kernels JIT-compile on whatever device is present at runtime (PTL).
+  if(DPCPP_SYCL_TARGET STREQUAL "spir64")
+    set(SYCL_TARGETS_OPTION -fsycl-targets=spir64)
+    set(SYCL_OFFLINE_COMPILER_AOT_OPTIONS "")
+    message(STATUS "SYCL JIT build (spir64) — no AOT device (PTL/Xe3 path)")
+  else()
+    set(SYCL_TARGETS_OPTION -fsycl-targets=spir64_gen)
+    set(SYCL_OFFLINE_COMPILER_AOT_OPTIONS "-device ${AOT_TARGETS}")
+    message(STATUS "Compile Intel GPU AOT Targets for ${AOT_TARGETS}")
+  endif()
   set(SYCL_KERNEL_OPTIONS ${SYCL_KERNEL_OPTIONS} ${SYCL_TARGETS_OPTION})
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} ${SYCL_TARGETS_OPTION})
-  set(SYCL_OFFLINE_COMPILER_AOT_OPTIONS "-device ${AOT_TARGETS}")
-  message(STATUS "Compile Intel GPU AOT Targets for ${AOT_TARGETS}")
   # SYCL compiler in basekit after 2025.2 needs more spirv arguments.
   if(SYCL_COMPILER_VERSION GREATER_EQUAL 20250806)
     set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} -Xspirv-translator;-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate)
@@ -147,7 +161,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 
   set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} ${SYCL_KERNEL_OPTIONS})
 
-  set(SYCL_OFFLINE_COMPILER_FLAGS "${SYCL_OFFLINE_COMPILER_AOT_OPTIONS}${SYCL_OFFLINE_COMPILER_CG_OPTIONS}")
+  # spir64 JIT: no ocloc at build time, so the ocloc -options (CG_OPTIONS) are
+  # also dropped — leaving the offline-compiler flag bundle empty.
+  if(DPCPP_SYCL_TARGET STREQUAL "spir64")
+    set(SYCL_OFFLINE_COMPILER_FLAGS "")
+  else()
+    set(SYCL_OFFLINE_COMPILER_FLAGS "${SYCL_OFFLINE_COMPILER_AOT_OPTIONS}${SYCL_OFFLINE_COMPILER_CG_OPTIONS}")
+  endif()
 else()
   message("Not compiling with XPU. Currently only support GCC compiler on Linux as CXX compiler.")
   return()
