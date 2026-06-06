@@ -23,7 +23,11 @@ struct gated_delta_rule_kernel {
       const T* a,
       const T* A_log,
       const T* dt_bias,
-      T* ssm_state,
+      // ssm_state is ALWAYS fp32 (the MambaPool temporal dtype). The kernel
+      // computes the recurrence in float internally, so it reads/writes the fp32
+      // pool DIRECTLY — no kdtype cast, enabling in-place pool access by
+      // cache_indices with no gather/scatter (§15 Stage B). Decoupled from T.
+      float* ssm_state,
       const int ssm_state_stride_0,
       const int* query_start_loc,
       const int* cache_indices,
@@ -102,7 +106,7 @@ struct gated_delta_rule_kernel {
     float k_local[k_bucket_size];
     float v_local[v_dim_per_sg];
 
-    T* ssm_state_ptr =
+    float* ssm_state_ptr =
         ssm_state +
         static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0;
 
@@ -251,7 +255,7 @@ struct gated_delta_rule_kernel {
   const T* a;
   const T* A_log;
   const T* dt_bias;
-  T* ssm_state;
+  float* ssm_state;  // fp32 pool, read/written in-place (§15 Stage B)
   const int ssm_state_stride_0;
   const int* query_start_loc;
   const int* cache_indices;
@@ -275,7 +279,7 @@ void kernel_launcher(
     const T* a,
     const T* A_log,
     const T* dt_bias,
-    T* ssm_state,
+    float* ssm_state,  // fp32 pool, in-place (§15 Stage B)
     const int ssm_state_stride_0,
     const int* query_start_loc,
     const int* cache_indices,
@@ -362,7 +366,7 @@ void gated_delta_rule(
       reinterpret_cast<scalar_t*>(a.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(A_log.data_ptr()),               \
       reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
-      reinterpret_cast<scalar_t*>(ssm_state.data_ptr()),           \
+      reinterpret_cast<float*>(ssm_state.data_ptr()),              \
       ssm_state_stride_0,                                          \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
       reinterpret_cast<int*>(cache_indices.data_ptr()),            \

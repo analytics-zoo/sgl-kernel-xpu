@@ -28,6 +28,8 @@ struct causal_conv1d_kernel {
       const T* conv_bias,
       T* conv_states,
       const int conv_states_stride_0,
+      const int conv_states_stride_i,
+      const int conv_states_stride_col,
       T* conv_states_tmp,
       int* query_start_loc,
       int* cache_indices,
@@ -54,6 +56,8 @@ struct causal_conv1d_kernel {
         conv_bias(conv_bias),
         conv_states(conv_states),
         conv_states_stride_0(conv_states_stride_0),
+        conv_states_stride_i(conv_states_stride_i),
+        conv_states_stride_col(conv_states_stride_col),
         conv_states_tmp(conv_states_tmp),
         query_start_loc(query_start_loc),
         cache_indices(cache_indices),
@@ -213,8 +217,8 @@ struct causal_conv1d_kernel {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
           local_input[Width * e + i] = conv_states_ptr
-              [(Width - 1 - states_load_len + i) * conv_elems +
-               reordered_elems_id + e];
+              [(Width - 1 - states_load_len + i) * conv_states_stride_i +
+               (reordered_elems_id + e) * conv_states_stride_col];
         }
       }
     }
@@ -271,7 +275,8 @@ struct causal_conv1d_kernel {
       for (int i = 0; i < Width - 1; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          conv_states_ptr[i * conv_elems + reordered_elems_id + e] =
+          conv_states_ptr[i * conv_states_stride_i +
+                          (reordered_elems_id + e) * conv_states_stride_col] =
               local_input[Width * e + i + 1];
         }
       }
@@ -327,6 +332,12 @@ struct causal_conv1d_kernel {
   const T* conv_bias;
   T* conv_states;
   const int conv_states_stride_0;
+  // Inner-layout strides for the per-slot conv_state, so the kernel can index a
+  // NATIVE [conv_dim, W-1] pool in-place (stride_i=1, stride_col=W-1) instead of
+  // requiring a transposed contiguous [W-1, conv_dim] scratch (stride_i=conv_dim,
+  // stride_col=1). Eliminates the Python gather/transpose/scatter adapter (§15).
+  const int conv_states_stride_i;
+  const int conv_states_stride_col;
   T* conv_states_tmp;
   const int32_t* query_start_loc;
   const int* cache_indices;
@@ -354,6 +365,8 @@ struct update_states_kernel {
   update_states_kernel(
       T* conv_states,
       const int conv_states_stride_0,
+      const int conv_states_stride_i,
+      const int conv_states_stride_col,
       const T* conv_states_tmp,
       const int* cache_indices,
       const int width,
@@ -362,6 +375,8 @@ struct update_states_kernel {
       const int batch_size)
       : conv_states(conv_states),
         conv_states_stride_0(conv_states_stride_0),
+        conv_states_stride_i(conv_states_stride_i),
+        conv_states_stride_col(conv_states_stride_col),
         conv_states_tmp(conv_states_tmp),
         cache_indices(cache_indices),
         width(width),
@@ -400,7 +415,7 @@ struct update_states_kernel {
     for (int i = elems_start_offset_group + local_id;
          i < (local_group_id + 1) * elems_per_group;
          i += group_size) {
-      conv_states_ptr[width_id * conv_elems + i] =
+      conv_states_ptr[width_id * conv_states_stride_i + i * conv_states_stride_col] =
           conv_states_tmp_ptr[width_id * conv_elems + i];
     }
   }
@@ -408,6 +423,8 @@ struct update_states_kernel {
  private:
   T* conv_states;
   const int conv_states_stride_0;
+  const int conv_states_stride_i;
+  const int conv_states_stride_col;
   const T* conv_states_tmp;
   const int* cache_indices;
   const int width;
@@ -431,6 +448,8 @@ void kernel_launcher(
     const T* conv_bias,
     T* conv_states,
     const int conv_states_stride_0,
+    const int conv_states_stride_i,
+    const int conv_states_stride_col,
     T* conv_states_tmp,
     int* query_start_loc,
     int* cache_indices,
@@ -464,6 +483,8 @@ void kernel_launcher(
         conv_bias,
         conv_states,
         conv_states_stride_0,
+        conv_states_stride_i,
+        conv_states_stride_col,
         conv_states_tmp,
         query_start_loc,
         cache_indices,
@@ -488,6 +509,8 @@ void kernel_launcher(
       KERNEL_UPDATE task(
           conv_states,
           conv_states_stride_0,
+          conv_states_stride_i,
+          conv_states_stride_col,
           conv_states_tmp,
           cache_indices,
           Width,
@@ -543,6 +566,13 @@ void causal_conv1d(
   const int conv_elems = conv_weights.size(0);
   const int width = conv_weights.size(1);
   const int conv_states_stride_0 = conv_states.stride(0);
+  // Inner strides derived from the tensor so a transposed VIEW of a native
+  // [cache, conv_dim, W-1] pool (passed as [cache, W-1, conv_dim]) is indexed
+  // in-place with NO copy: stride(1)=W-1-axis step, stride(2)=conv_dim-axis step.
+  // For a contiguous [cache, W-1, conv_dim] tensor these are (conv_dim, 1) =
+  // the original behavior. (§15 adapter elimination.)
+  const int conv_states_stride_i = conv_states.stride(1);
+  const int conv_states_stride_col = conv_states.stride(2);
 
   auto dtype = conv_states.dtype();
   auto device = conv_states.device();
@@ -567,6 +597,8 @@ void causal_conv1d(
           : nullptr,                                               \
       reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
       conv_states_stride_0,                                        \
+      conv_states_stride_i,                                        \
+      conv_states_stride_col,                                      \
       reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
       reinterpret_cast<int*>(cache_indices.data_ptr()),            \

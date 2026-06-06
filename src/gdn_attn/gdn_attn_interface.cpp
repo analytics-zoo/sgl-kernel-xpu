@@ -57,9 +57,11 @@ void gdn_attention(
   TORCH_CHECK(
       projected_states_ba.is_contiguous(),
       "projected_states_ba must be contiguous");
-  TORCH_CHECK(
-      conv_state[0].is_contiguous(),
-      "conv_state of each batch must be contiguous");
+  // conv_state may be a NON-contiguous transposed VIEW of a native
+  // [cache, conv_dim, W-1] pool (passed as [cache, W-1, conv_dim]). The kernel
+  // indexes it with strides derived from the tensor (conv_states_stride_i/col),
+  // so contiguity is NOT required — only that the inner 2 dims are stride-addressable
+  // (they always are for a transpose of a contiguous pool). (§15 adapter elimination.)
   TORCH_CHECK(
       ssm_state[0].is_contiguous(),
       "ssm_state of each batch must be contiguous");

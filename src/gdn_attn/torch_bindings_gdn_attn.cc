@@ -37,7 +37,23 @@ void gdn_attention(
     const int64_t num_actual_tokens,
     const int64_t tp_size);
 
+// Plain-SYCL RMSNormGated for the GDN output norm (rms_norm_gated_sycl.cpp).
+// Replaces the triton layernorm_gated fallback (the ESIMD variant's bucket is
+// disabled). out = rmsnorm(x) * weight * silu(z). fp16-only.
+namespace gdn {
+at::Tensor rms_norm_gated(
+    at::Tensor& output,
+    const at::Tensor& x,
+    const at::Tensor& z,
+    const at::Tensor& weight,
+    double eps);
+}  // namespace gdn
+
 TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
+  m.def(
+      "gdn_rms_norm_gated(Tensor! output, Tensor x, Tensor z, Tensor weight, "
+      "float eps) -> Tensor");
+  m.impl("gdn_rms_norm_gated", torch::kXPU, &gdn::rms_norm_gated);
   m.def(
       "gdn_attention(Tensor! core_attn_out, Tensor! z, Tensor "
       "projected_states_qkvz, Tensor projected_states_ba,"
