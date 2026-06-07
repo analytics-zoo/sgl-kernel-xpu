@@ -1375,7 +1375,13 @@ void kernel_launcher(
   });
   EventManager::getInstance().addEvent(event_compute_A);
 
-  if (vllm::xpu::is_bmg()) {
+  // The native inverse below is a PVC-only workaround (sycl tla accuracy issue
+  // on PVC, comment below). BMG always used the fast MMA opt. PTL Xe3 also runs
+  // the cute/MMA chunk kernels fine (ChunkFwdO/ComputeWU/ComputeA all MMA-based
+  // and verified on PTL), and the accuracy issue was PVC-specific — so route PTL
+  // (and anything not-PVC) to the fast MMA opt inverse too. Gated by GSM8K
+  // correctness; if PTL hits the PVC-style accuracy issue, revert to is_bmg().
+  if (!vllm::xpu::is_pvc()) {
     using WGTileInverse = chunk_gemm_policy_inverse::WGTile;
     using SGLayoutInverse = chunk_gemm_policy_inverse::SGLayout;
     using MMAInverse = typename TiledMMAHelper<
