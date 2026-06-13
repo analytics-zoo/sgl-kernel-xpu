@@ -296,8 +296,17 @@ CUTE_DEVICE void chunk_compute_A_kernel(
                 b[(chunk_start_offset + m_idx) +
                   v_head_id * total_virtual_seqlen];
 
-            tSrA_c(sn * SG_M + sm) *=
-                sycl::exp(g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx]) * beta_value;
+            // NaN FIX (root-caused 2026-06-13, cc_workspace #139-b): g_cum is
+            // monotone-decreasing (decay increments are -exp(A_log)*softplus<0),
+            // so for KEPT entries (m>=n) the arg g[m]-g[n] is <=0 → exp<=1. For
+            // the to-be-MASKED upper-tri (m<n) the arg is large POSITIVE (dumped
+            // m=0,n=32: diff=+1298 → exp=inf), and since K·Kᵀ there can be 0,
+            // 0*inf = NaN is produced BEFORE the mask zeroes it, and leaks out.
+            // Clamp the exp arg to <=0: a no-op on kept entries (already <=0),
+            // turns the masked-entry inf into exp(0)=1 (finite) → 0*1=0 clean.
+            float argA = g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx];
+            argA = sycl::fmin(argA, 0.0f);
+            tSrA_c(sn * SG_M + sm) *= sycl::exp(argA) * beta_value;
             if (m_idx == n_idx) {
               tSrA_c(sn * SG_M + sm) = 1.0f;
             }
@@ -1138,8 +1147,12 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         CUTE_UNROLL
         for (int sm = 0; sm < SG_M; ++sm) {
           int m_idx = m_tile_start + m_sg_start + sm;
-          tSrO2_c(sn * SG_M + sm) *=
-              sycl::exp(g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx]);
+          // NaN FIX (#139-b): same as compute_A — clamp exp arg <=0 so the
+          // to-be-masked upper-tri (m<n, arg large positive → exp=inf → 0*inf
+          // =NaN leak) becomes finite; no-op on kept m>=n entries (arg<=0).
+          float argO2 = g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx];
+          argO2 = sycl::fmin(argO2, 0.0f);
+          tSrO2_c(sn * SG_M + sm) *= sycl::exp(argO2);
           if (m_idx < n_idx) {
             tSrO2_c(sn * SG_M + sm) = 0.0f;
           }
