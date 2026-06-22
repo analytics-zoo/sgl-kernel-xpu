@@ -35,7 +35,13 @@ void gdn_attention(
     const torch::Tensor& non_spec_query_start_loc,
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
-    const int64_t tp_size);
+    const int64_t tp_size,
+    // RADIX TRACK-BUFFER FIX: optional per-chunk intermediate ssm snapshot.
+    const std::optional<torch::Tensor>& inter_ssm,
+    const std::optional<torch::Tensor>& inter_ssm_indices,
+    // RADIX TRACK-BUFFER FIX: optional aligned-boundary conv snapshot.
+    const std::optional<torch::Tensor>& inter_conv,
+    const std::optional<torch::Tensor>& inter_conv_indices);
 
 // Plain-SYCL RMSNormGated for the GDN output norm (rms_norm_gated_sycl.cpp).
 // Replaces the triton layernorm_gated fallback (the ESIMD variant's bucket is
@@ -63,6 +69,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "int num_prefills, int num_decodes, Tensor? has_initial_state, Tensor "
       "non_spec_query_start_loc,"
       "Tensor non_spec_state_indices_tensor, int num_actual_tokens, int "
-      "tp_size) -> ()");
+      "tp_size, Tensor!? inter_ssm=None, Tensor? inter_ssm_indices=None, "
+      "Tensor!? inter_conv=None, Tensor? inter_conv_indices=None) -> ()");
   m.impl("gdn_attention", torch::kXPU, &gdn_attention);
 }

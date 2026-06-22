@@ -38,6 +38,12 @@ def gdn_attention(
     non_spec_state_indices_tensor: torch.Tensor,
     num_actual_tokens: int,
     tp_size: int,
+    # RADIX TRACK-BUFFER FIX: optional per-chunk intermediate ssm snapshot.
+    inter_ssm: Optional[torch.Tensor] = None,
+    inter_ssm_indices: Optional[torch.Tensor] = None,
+    # RADIX TRACK-BUFFER FIX: optional aligned-boundary conv snapshot.
+    inter_conv: Optional[torch.Tensor] = None,
+    inter_conv_indices: Optional[torch.Tensor] = None,
 ) -> None:
     torch.ops.sgl_kernel.gdn_attention(
         core_attn_out,
@@ -62,4 +68,8 @@ def gdn_attention(
         non_spec_state_indices_tensor,
         num_actual_tokens,
         tp_size,
+        inter_ssm,
+        inter_ssm_indices,
+        inter_conv,
+        inter_conv_indices,
     )

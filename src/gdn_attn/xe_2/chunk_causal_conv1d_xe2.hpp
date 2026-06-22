@@ -45,7 +45,11 @@ struct chunk_causal_conv1d_kernel {
       const int& num_v_heads,
       const int& head_v_dim,
       const int& qkvz_elems,
-      const int& conv_elems)
+      const int& conv_elems,
+      // RADIX TRACK-BUFFER FIX: optional aligned-boundary conv snapshot.
+      T* inter_conv,
+      const int inter_conv_stride_0,
+      const int* inter_conv_indices)
       : q_out(q_out),
         k_out(k_out),
         v_out(v_out),
@@ -72,7 +76,10 @@ struct chunk_causal_conv1d_kernel {
         num_v_heads(num_v_heads),
         head_v_dim(head_v_dim),
         qkvz_elems(qkvz_elems),
-        conv_elems(conv_elems) {}
+        conv_elems(conv_elems),
+        inter_conv(inter_conv),
+        inter_conv_stride_0(inter_conv_stride_0),
+        inter_conv_indices(inter_conv_indices) {}
 
   static inline sycl::nd_range<2> get_nd_range(
       const int total_seqlen,
@@ -264,6 +271,37 @@ struct chunk_causal_conv1d_kernel {
       }
     }
 
+    // RADIX TRACK-BUFFER FIX: snapshot the conv window at the 64-ALIGNED
+    // boundary of this (prefill) sequence into inter_conv, for radix
+    // prefix-reuse. The radix reuse point is the 64-aligned position
+    // aligned_len = (seq_len/chunk_size)*chunk_size, NOT the (possibly
+    // unaligned) sequence end. CUDA gathers this window from the conv input
+    // at aligned_len (_init_track_conv_indices). At the aligned-boundary token
+    // (seq_start + aligned_len - 1) this worker's local_input[W*e+i+1] holds
+    // exactly the W-1 history tokens ending at that boundary — identical
+    // expression to the final-window save above, just a different trigger
+    // position + destination. Only meaningful for a prefill that needs
+    // tracking (inter_conv_indices[batch_id] >= 0); a no-op otherwise.
+    if (inter_conv != nullptr && inter_conv_indices != nullptr &&
+        seq_end_offset - seq_start_offset > 1) {
+      const int islot = inter_conv_indices[batch_id];
+      const int aligned_len =
+          ((seq_end_offset - seq_start_offset) / chunk_size) * chunk_size;
+      if (islot >= 0 && aligned_len > 0 &&
+          token_id == seq_start_offset + aligned_len - 1) {
+        T* ic_ptr =
+            inter_conv + static_cast<int64_t>(islot) * inter_conv_stride_0;
+#pragma unroll
+        for (int i = 0; i < Width - 1; ++i) {
+#pragma unroll
+          for (int e = 0; e < elems_per_item; ++e) {
+            ic_ptr[i * conv_elems + reordered_elems_offset + e] =
+                local_input[Width * e + i + 1];
+          }
+        }
+      }
+    }
+
     if (act_mode == ActMode::silu) {
 #pragma unroll
       for (int e = 0; e < elems_per_item; ++e) {
@@ -329,6 +367,9 @@ struct chunk_causal_conv1d_kernel {
   const int head_v_dim;
   const int qkvz_elems;
   const int conv_elems;
+  T* inter_conv;
+  const int inter_conv_stride_0;
+  const int* inter_conv_indices;
 };
 
 template <typename T>
@@ -552,7 +593,10 @@ void kernel_launcher(
     const int& qkvz_elems,
     const int& conv_elems,
     const int& num_prefills,
-    const int& num_decodes) {
+    const int& num_decodes,
+    T* inter_conv,
+    const int inter_conv_stride_0,
+    const int* inter_conv_indices) {
   using KERNEL_MAIN = chunk_causal_conv1d_kernel<T, Width>;
   auto range_main = KERNEL_MAIN::get_nd_range(
       num_actual_tokens, num_k_heads, head_k_dim, num_v_heads, head_v_dim);
@@ -584,7 +628,10 @@ void kernel_launcher(
         num_v_heads,
         head_v_dim,
         qkvz_elems,
-        conv_elems);
+        conv_elems,
+        inter_conv,
+        inter_conv_stride_0,
+        inter_conv_indices);
     cgh.parallel_for(range_main, task);
   });
 
@@ -661,7 +708,11 @@ void chunk_causal_conv1d_xe2(
     const ActMode& act_mode,  // silu or swish
     const int& pad_slot_id,   // -1
     const int num_prefills,
-    const int num_decodes) {
+    const int num_decodes,
+    // RADIX TRACK-BUFFER FIX: optional aligned-boundary conv snapshot.
+    // inter_conv [islots, W-1, conv_elems]; inter_conv_indices [batch_size].
+    const std::optional<torch::Tensor>& inter_conv = std::nullopt,
+    const std::optional<torch::Tensor>& inter_conv_indices = std::nullopt) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -683,6 +734,18 @@ void chunk_causal_conv1d_xe2(
   torch::Tensor conv_states_tmp = torch::empty(
       {batch_size, width - 1, conv_elems},
       torch::dtype(dtype).device(device).requires_grad(false));
+
+  // RADIX TRACK-BUFFER FIX: resolve optional aligned-boundary conv snapshot.
+  // inter_conv shape [islots, width-1, conv_elems]; stride(0) = (width-1)*conv_elems.
+  void* inter_conv_ptr = nullptr;
+  int inter_conv_stride_0 = 0;
+  const int* inter_conv_indices_ptr = nullptr;
+  if (inter_conv.has_value() && inter_conv_indices.has_value()) {
+    inter_conv_ptr = inter_conv->data_ptr();
+    inter_conv_stride_0 = inter_conv->stride(0);
+    inter_conv_indices_ptr =
+        reinterpret_cast<const int*>(inter_conv_indices->data_ptr());
+  }
 
 #define KERNEL_LAUNCHER(scalar_t, width)                           \
   kernel_launcher<scalar_t, width>(                                \
@@ -719,7 +782,10 @@ void chunk_causal_conv1d_xe2(
       qkvz_elems,                                                  \
       conv_elems,                                                  \
       num_prefills,                                                \
-      num_decodes);
+      num_decodes,                                                 \
+      reinterpret_cast<scalar_t*>(inter_conv_ptr),                 \
+      inter_conv_stride_0,                                         \
+      inter_conv_indices_ptr);
 
 #define WIDTH_DISPATCH(scalar_t, width) \
   switch (width) {                      \

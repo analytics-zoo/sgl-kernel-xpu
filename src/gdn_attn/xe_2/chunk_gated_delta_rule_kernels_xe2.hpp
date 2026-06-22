@@ -946,7 +946,17 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
     const int num_k_heads,
     const int head_k_dim,
     const int num_v_heads,
-    const int head_v_dim) {
+    const int head_v_dim,
+    // RADIX TRACK-BUFFER FIX: optional per-chunk intermediate ssm output.
+    // inter_ssm layout [islots, max_chunks, num_v_heads, head_v_dim, head_k_dim];
+    // inter_ssm_indices[batch_id] = islot (or <0 to skip). When non-null, after
+    // each chunk's S update we also write S into inter_ssm[islot, chunk_id, vhead].
+    // Lets the radix extra_buffer track slot hold the mid-sequence carry state
+    // (CUDA gets this from FLA's intermediate `h`; XPU GDN previously had none).
+    T* inter_ssm = nullptr,
+    const int inter_ssm_stride_0 = 0,
+    const int inter_ssm_stride_chunk = 0,
+    const int* inter_ssm_indices = nullptr) {
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   int local_id = item.get_local_linear_id();
   int current_batch_id = item.get_group(0);
@@ -1260,6 +1270,27 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           copy(copy_O_c, tCrO_c, tCgO_c);
         }
       }
+
+      // RADIX TRACK-BUFFER FIX: after this chunk's S has been written back to
+      // ssm_state_ptr (the cute copy_S_d above), also snapshot it into
+      // inter_ssm[islot, chunk_id, v_head]. This gives the radix extra_buffer
+      // track slot the mid-sequence carry state for cross-turn prefix reuse.
+      // Plain element copy from the just-updated ssm_state_ptr (avoids touching
+      // the MMA tiled layout); local_id-parallel over head_v_dim*head_k_dim.
+      if (inter_ssm != nullptr && inter_ssm_indices != nullptr) {
+        const int islot = inter_ssm_indices[batch_id];
+        if (islot >= 0) {
+          item.barrier(sycl::access::fence_space::global_and_local);
+          T* is_ptr = inter_ssm +
+                      static_cast<int64_t>(islot) * inter_ssm_stride_0 +
+                      static_cast<int64_t>(chunk_id) * inter_ssm_stride_chunk +
+                      v_head_id * head_v_dim * head_k_dim;
+          const int s_elems = head_v_dim * head_k_dim;
+          for (int e = local_id; e < s_elems; e += local_range) {
+            is_ptr[e] = ssm_state_ptr[e];
+          }
+        }
+      }
     }
     pre_chunks += current_chunks;
   }
@@ -1307,7 +1338,13 @@ void kernel_launcher(
     const int num_k_heads,
     const int head_k_dim,
     const int num_v_heads,
-    const int head_v_dim) {
+    const int head_v_dim,
+    // RADIX TRACK-BUFFER FIX: optional per-chunk intermediate ssm output (see
+    // chunk_fwd_o_kernel). Defaults null → no-op, all existing callers unaffected.
+    T* inter_ssm = nullptr,
+    const int inter_ssm_stride_0 = 0,
+    const int inter_ssm_stride_chunk = 0,
+    const int* inter_ssm_indices = nullptr) {
   using Element_non_CV = cutlass::platform::remove_cv_t<T>;
   auto op = XE_DPAS_TT<8, float, Element_non_CV>{};
 
@@ -1548,7 +1585,11 @@ void kernel_launcher(
               num_k_heads,
               head_k_dim,
               num_v_heads,
-              head_v_dim);
+              head_v_dim,
+              inter_ssm,
+              inter_ssm_stride_0,
+              inter_ssm_stride_chunk,
+              inter_ssm_indices);
         });
   });
   EventManager::getInstance().addEvent(event_fwd_o);
@@ -1571,7 +1612,12 @@ void chunk_gated_delta_rule_impl_xe2(
     const std::optional<torch::Tensor>&
         has_initial_state,  // [batch_size] or None
     const int num_prefills,
-    const int num_decodes) {
+    const int num_decodes,
+    // RADIX TRACK-BUFFER FIX: optional per-chunk intermediate ssm snapshot
+    // outputs. inter_ssm [islots, max_chunks, num_v_heads, head_v_dim, head_k_dim],
+    // inter_ssm_indices [batch_size] (islot per req, <0 to skip). Defaults None.
+    const std::optional<torch::Tensor>& inter_ssm = std::nullopt,
+    const std::optional<torch::Tensor>& inter_ssm_indices = std::nullopt) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -1589,6 +1635,20 @@ void chunk_gated_delta_rule_impl_xe2(
   const int ssm_state_stride_0 = ssm_state.stride(0);
 
   TORCH_CHECK(num_v_heads % num_k_heads == 0);
+
+  // RADIX TRACK-BUFFER FIX: resolve optional inter_ssm outputs.
+  // inter_ssm shape [islots, max_chunks, num_v_heads, head_v_dim, head_k_dim].
+  void* inter_ssm_ptr = nullptr;
+  int inter_ssm_stride_0 = 0;
+  int inter_ssm_stride_chunk = 0;
+  const int* inter_ssm_indices_ptr = nullptr;
+  if (inter_ssm.has_value() && inter_ssm_indices.has_value()) {
+    inter_ssm_ptr = inter_ssm->data_ptr();
+    inter_ssm_stride_0 = inter_ssm->stride(0);
+    inter_ssm_stride_chunk = inter_ssm->stride(1);
+    inter_ssm_indices_ptr =
+        reinterpret_cast<const int*>(inter_ssm_indices->data_ptr());
+  }
 
   auto dtype = core_attn_out.dtype();
   auto device = core_attn_out.device();
@@ -1631,7 +1691,11 @@ void chunk_gated_delta_rule_impl_xe2(
       num_k_heads,                                                 \
       head_k_dim,                                                  \
       num_v_heads,                                                 \
-      head_v_dim);
+      head_v_dim,                                                  \
+      reinterpret_cast<scalar_t*>(inter_ssm_ptr),                  \
+      inter_ssm_stride_0,                                          \
+      inter_ssm_stride_chunk,                                      \
+      inter_ssm_indices_ptr);
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {
     using scalar_t = bfloat16_t;

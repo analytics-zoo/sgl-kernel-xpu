@@ -47,7 +47,16 @@ void gdn_attention(
     const torch::Tensor& non_spec_query_start_loc,       // [batch_size + 1]
     const torch::Tensor& non_spec_state_indices_tensor,  // [batch_size]
     const int64_t num_actual_tokens,
-    const int64_t tp_size) {
+    const int64_t tp_size,
+    // RADIX TRACK-BUFFER FIX: optional per-chunk intermediate ssm snapshot.
+    // inter_ssm [islots, max_chunks, num_v_heads/tp, head_v_dim, head_k_dim];
+    // inter_ssm_indices [batch_size] (islot per req, <0 skip). prefill path only.
+    const std::optional<torch::Tensor>& inter_ssm = std::nullopt,
+    const std::optional<torch::Tensor>& inter_ssm_indices = std::nullopt,
+    // RADIX TRACK-BUFFER FIX: optional aligned-boundary conv snapshot.
+    // inter_conv [islots, width-1, conv_elems]; inter_conv_indices [batch_size].
+    const std::optional<torch::Tensor>& inter_conv = std::nullopt,
+    const std::optional<torch::Tensor>& inter_conv_indices = std::nullopt) {
   TORCH_CHECK(
       core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
   TORCH_CHECK(z.is_contiguous(), "z must be contiguous");
@@ -205,7 +214,9 @@ void gdn_attention(
         act_mode,
         pad_slot_id,
         num_prefills,
-        num_decodes);
+        num_decodes,
+        inter_conv,
+        inter_conv_indices);
 
     chunk_gated_delta_rule_xe2(
         queue,
@@ -222,7 +233,9 @@ void gdn_attention(
         non_spec_state_indices_tensor,
         has_initial_state,
         num_prefills,
-        num_decodes);
+        num_decodes,
+        inter_ssm,
+        inter_ssm_indices);
   } else {
     NATIVE_LAUNCHER;
   }

@@ -21,7 +21,10 @@ void chunk_gated_delta_rule_xe2(
     const std::optional<torch::Tensor>&
         has_initial_state,  // [batch_size] or None
     const int num_prefills,
-    const int num_decodes) {
+    const int num_decodes,
+    // RADIX TRACK-BUFFER FIX: optional per-chunk intermediate ssm snapshot.
+    const std::optional<torch::Tensor>& inter_ssm,
+    const std::optional<torch::Tensor>& inter_ssm_indices) {
   gdn::chunk_gated_delta_rule_impl_xe2(
       queue,
       core_attn_out,
@@ -37,5 +40,7 @@ void chunk_gated_delta_rule_xe2(
       cache_indices,
       has_initial_state,
       num_prefills,
-      num_decodes);
+      num_decodes,
+      inter_ssm,
+      inter_ssm_indices);
 }
