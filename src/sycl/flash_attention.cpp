@@ -471,6 +471,16 @@ std::vector<at::Tensor> mha_fwd(
 
   params.cu_seqlens_q = cu_seqlens_q.data_ptr<int>();
   params.cu_seqlens_k = cu_seqlens_k.data_ptr<int>();
+  // Prefill/decode runners both read params.cu_seqlens_knew to build the
+  // "new K" ragged-tensor shape (see xe_fmha_fwd_*_runner.hpp:
+  // shape.seq_len_kv.cumulative_length = params.cu_seqlens_knew). When the
+  // caller does not separately pass new-K offsets (sglang's flash_attn
+  // wrapper collapses cu_seqlens_k_new into cu_seqlens_k for the
+  // cache_seqlens case), leaving cu_seqlens_knew uninitialized dereferences
+  // a garbage pointer on device and trips Indexing.h:622. Alias it to the
+  // same pointer as cu_seqlens_k — in this code path all K tokens are "new"
+  // from the kernel's perspective, so the two sequences are identical.
+  params.cu_seqlens_knew = cu_seqlens_k.data_ptr<int>();
   params.num_kv_splits = num_kv_splits;
 
   // Softmax sum
@@ -958,6 +968,9 @@ std::vector<at::Tensor> mha_fwd(
 
   params.cu_seqlens_q = cu_seqlens_q.data_ptr<int>();
   params.cu_seqlens_k = cu_seqlens_k.data_ptr<int>();
+  // See matching comment in decode::mha_fwd — cu_seqlens_knew must not be
+  // left uninitialized; prefill runner reads it when isVarLen=true.
+  params.cu_seqlens_knew = cu_seqlens_k.data_ptr<int>();
 
   // Softmax sum
   params.softmax_lse_ptr = softmax_lse.data_ptr();
