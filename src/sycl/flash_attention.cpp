@@ -471,6 +471,16 @@ std::vector<at::Tensor> mha_fwd(
 
   params.cu_seqlens_q = cu_seqlens_q.data_ptr<int>();
   params.cu_seqlens_k = cu_seqlens_k.data_ptr<int>();
+  // Prefill/decode runners both read params.cu_seqlens_knew to build the
+  // "new K" ragged-tensor shape (see xe_fmha_fwd_*_runner.hpp:
+  // shape.seq_len_kv.cumulative_length = params.cu_seqlens_knew). When the
+  // caller does not separately pass new-K offsets (sglang's flash_attn
+  // wrapper collapses cu_seqlens_k_new into cu_seqlens_k for the
+  // cache_seqlens case), leaving cu_seqlens_knew uninitialized dereferences
+  // a garbage pointer on device and trips Indexing.h:622. Alias it to the
+  // same pointer as cu_seqlens_k — in this code path all K tokens are "new"
+  // from the kernel's perspective, so the two sequences are identical.
+  params.cu_seqlens_knew = cu_seqlens_k.data_ptr<int>();
   params.num_kv_splits = num_kv_splits;
 
   // Softmax sum
@@ -483,6 +493,11 @@ std::vector<at::Tensor> mha_fwd(
   params.q_group_size = num_heads / num_heads_k;
   params.seqlen_q = seqlen_q;
   params.seqlen_k = seqlen_k;
+  // Arguments::seqlen_knew has no in-struct default — leaving it
+  // uninitialized pairs with the cu_seqlens_knew alias above to feed garbage
+  // into the runner's shape construction. Mirror cu_seqlens_knew and alias
+  // it to seqlen_k for sglang's call pattern (all K is "new").
+  params.seqlen_knew = seqlen_k;
   params.d = head_size;
   params.d_rounded = head_size_rounded;
 
@@ -504,8 +519,12 @@ std::vector<at::Tensor> mha_fwd(
 
   // Causal is the special case where window_size_right == 0 and window_size_left < 0.
   // Local is the more general case where window_size_right >= 0 or window_size_left >= 0.
-  params.is_causal = false;  // Decode don't need causal mask since we only compute attention for the current token, but
-                             // this kernel can also be used for local attention in the future
+  // Bug: previously is_causal was hardcoded false, but window_size_right was
+  // set to 0 above when the caller passed causal=true; the kernel then saw
+  // (right==0, left==-1, is_causal=false) and classified the mask as local
+  // SWA, which hangs on small-batch decode for (h_k=2, d=256, b=1). Use the
+  // same causal-vs-local detection as the prefill path.
+  params.is_causal = window_size_left < 0 && window_size_right == 0;
   params.is_local = (window_size_left >= 0 || window_size_right >= 0) && !params.is_causal;
 
   // TODO: check this
@@ -519,6 +538,10 @@ std::vector<at::Tensor> mha_fwd(
   params.window_size_right = window_size_right;
   params.total_q = total_q;
   params.total_k = total_k;
+  // Arguments::total_knew defaults to 0 but is read by the runner's varlen
+  // shape construction. Alias it to total_k so the ragged-tensor shape
+  // matches the cu_seqlens_knew alias set above.
+  params.total_knew = total_k;
   params.b_k = batch_size_k;
   params.dv = head_size_v;
   params.page_table = page_table.value().data_ptr<int>();
@@ -958,6 +981,9 @@ std::vector<at::Tensor> mha_fwd(
 
   params.cu_seqlens_q = cu_seqlens_q.data_ptr<int>();
   params.cu_seqlens_k = cu_seqlens_k.data_ptr<int>();
+  // See matching comment in decode::mha_fwd — cu_seqlens_knew must not be
+  // left uninitialized; prefill runner reads it when isVarLen=true.
+  params.cu_seqlens_knew = cu_seqlens_k.data_ptr<int>();
 
   // Softmax sum
   params.softmax_lse_ptr = softmax_lse.data_ptr();
@@ -969,6 +995,9 @@ std::vector<at::Tensor> mha_fwd(
   params.q_group_size = 1;
   params.seqlen_q = seqlen_q;
   params.seqlen_k = seqlen_k;
+  // See matching comment in decode::mha_fwd — seqlen_knew has no in-struct
+  // default; alias it to seqlen_k for sglang's call pattern.
+  params.seqlen_knew = seqlen_k;
   params.d = head_size;
   params.d_rounded = head_size_rounded;
 
@@ -1002,6 +1031,10 @@ std::vector<at::Tensor> mha_fwd(
   params.window_size_right = window_size_right;
   params.total_q = total_q;
   params.total_k = total_k;
+  // Arguments::total_knew defaults to 0 but is read by the runner's varlen
+  // shape construction. Alias it to total_k so the ragged-tensor shape
+  // matches the cu_seqlens_knew alias set above.
+  params.total_knew = total_k;
   params.b_k = batch_size_k;
   params.dv = head_size_v;
   params.page_table = page_table.value().data_ptr<int>();
