@@ -37,6 +37,17 @@
 
 namespace decode {
 
+#define DISPATCH_DTYPE_SPLIT_DECODE(LOCAL, SINK, TILEQK, TILEPV, TILEOUT, SGLAYOUT, PARAMS) \
+  do {                                                                                       \
+    if ((PARAMS).is_bf16) {                                                                  \
+      SplitDecodeConfig<false, LOCAL, SINK, TILEQK, TILEPV, TILEOUT, SGLAYOUT,              \
+                        void, 1, bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t>::run(PARAMS); \
+    } else {                                                                                 \
+      SplitDecodeConfig<false, LOCAL, SINK, TILEQK, TILEPV, TILEOUT, SGLAYOUT,              \
+                        void, 1, half_t, half_t, half_t, half_t>::run(PARAMS);               \
+    }                                                                                        \
+  } while (0)
+
 template <>
 void FmhaSplitDecodeRunner<@QG_SZ@, @HEAD_DIM@, @PAGE_SIZE@>::operator()(const Arguments& params) const {
   using TileShapeQK = cute::Shape<cute::Int<@QG_SZ@>, cute::Int<@PAGE_SIZE@>, cute::_64>;
@@ -51,8 +62,7 @@ void FmhaSplitDecodeRunner<@QG_SZ@, @HEAD_DIM@, @PAGE_SIZE@>::operator()(const A
 #if @HEAD_DIM@ == 64
     AT_DISPATCH_BOOL_NO_RETURN(params.use_sink, Sink, {
       AT_DISPATCH_BOOL_NO_RETURN(params.is_local, LocalMask, {
-        SplitDecodeConfig<false, LocalMask, Sink, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK>::run(
-            params);
+        DISPATCH_DTYPE_SPLIT_DECODE(LocalMask, Sink, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK, params);
       });
   });
 #else
@@ -60,11 +70,12 @@ void FmhaSplitDecodeRunner<@QG_SZ@, @HEAD_DIM@, @PAGE_SIZE@>::operator()(const A
         !params.use_sink,
         "sink is only supported for head_size == 64, got @HEAD_DIM@");
     AT_DISPATCH_BOOL_NO_RETURN(params.is_local, LocalMask, {
-      SplitDecodeConfig<false, LocalMask, false, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK>::run(
-          params);
+      DISPATCH_DTYPE_SPLIT_DECODE(LocalMask, false, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK, params);
     });
 #endif
 }
+
+#undef DISPATCH_DTYPE_SPLIT_DECODE
 
 template struct FmhaSplitDecodeRunner<@QG_SZ@, @HEAD_DIM@, @PAGE_SIZE@>;
 
