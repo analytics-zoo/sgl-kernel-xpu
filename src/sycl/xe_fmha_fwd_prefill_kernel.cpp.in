@@ -36,6 +36,20 @@
 
 namespace prefill {
 
+// Dispatch helper: instantiate FMHAConfig with the correct Element types based
+// on params.is_bf16. Without this, only the bf16 template was ever compiled,
+// causing fp16 inputs to be silently reinterpreted as bf16 (producing garbage).
+#define DISPATCH_DTYPE_PREFILL(CAUSAL, LOCAL, SINK, TILEQK, TILEPV, TILEOUT, SGLAYOUT, RUN_FN, PARAMS) \
+  do {                                                                                                  \
+    if ((PARAMS).is_bf16) {                                                                             \
+      FMHAConfig<CAUSAL, LOCAL, SINK, TILEQK, TILEPV, TILEOUT, SGLAYOUT,                               \
+                 void, 2, false, bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t>::RUN_FN(PARAMS);      \
+    } else {                                                                                            \
+      FMHAConfig<CAUSAL, LOCAL, SINK, TILEQK, TILEPV, TILEOUT, SGLAYOUT,                               \
+                 void, 2, false, half_t, half_t, half_t, half_t>::RUN_FN(PARAMS);                       \
+    }                                                                                                   \
+  } while (0)
+
 template <>
 void FmhaPrefillRunner<@HEAD_DIM@>::operator()(const Arguments& params) const {
   bool use_sink = (params.softmax_sink_ptr != nullptr);
@@ -55,8 +69,7 @@ void FmhaPrefillRunner<@HEAD_DIM@>::operator()(const Arguments& params) const {
     // No sink support for no_page path; always use Sink=false
     AT_DISPATCH_BOOL_NO_RETURN(params.is_local, LocalMask, {
       AT_DISPATCH_BOOL_NO_RETURN(params.is_causal, Causal, {
-        FMHAConfig<Causal, LocalMask, false, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK>::run_nopaged(
-            params);
+        DISPATCH_DTYPE_PREFILL(Causal, LocalMask, false, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK, run_nopaged, params);
       });
     });
     return;
@@ -78,8 +91,7 @@ void FmhaPrefillRunner<@HEAD_DIM@>::operator()(const Arguments& params) const {
   AT_DISPATCH_BOOL_NO_RETURN(use_sink, Sink, {
     AT_DISPATCH_BOOL_NO_RETURN(params.is_local, LocalMask, {
       AT_DISPATCH_BOOL_NO_RETURN(params.is_causal, Causal, {
-        FMHAConfig<Causal, LocalMask, Sink, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK>::run_paged(
-            params);
+        DISPATCH_DTYPE_PREFILL(Causal, LocalMask, Sink, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK, run_paged, params);
       });
     });
   });
@@ -89,8 +101,7 @@ void FmhaPrefillRunner<@HEAD_DIM@>::operator()(const Arguments& params) const {
       "sink is only supported for head_size == 64, got @HEAD_DIM@");
   AT_DISPATCH_BOOL_NO_RETURN(params.is_local, LocalMask, {
     AT_DISPATCH_BOOL_NO_RETURN(params.is_causal, Causal, {
-      FMHAConfig<Causal, LocalMask, false, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK>::run_paged(
-          params);
+      DISPATCH_DTYPE_PREFILL(Causal, LocalMask, false, TileShapeQK, TileShapePV, TileShapeOutput, SubgroupLayoutQK, run_paged, params);
     });
   });
 #endif
@@ -98,6 +109,8 @@ void FmhaPrefillRunner<@HEAD_DIM@>::operator()(const Arguments& params) const {
   TORCH_CHECK(false, "head dim @HEAD_DIM@ is not compiled for the paged prefill path");
 #endif
 }
+
+#undef DISPATCH_DTYPE_PREFILL
 
 template struct FmhaPrefillRunner<@HEAD_DIM@>;
 
